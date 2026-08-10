@@ -4438,82 +4438,71 @@ int HafCpu_Threshold_U8_S16_Binary
 		vx_int16      threshold
 	)
 {
-	// C code 
-	for (int height = 0; height < (int) dstHeight; height++)
+	// S16 input -> U8 binary mask (255 where pixel > threshold, else 0).
+	// AVX2 path processes 32 pixels per iteration using signed compare + pack.
+#if USE_AVX
+	const __m256i vThresh = _mm256_set1_epi16((short)threshold);
+	const __m256i vZero16 = _mm256_setzero_si256();
+	for (int height = 0; height < (int)dstHeight; height++)
 	{
-		for (int width = 0; width < (int) dstWidth; width++)
+		vx_int16 *pLocalSrc = (vx_int16 *)((vx_uint8 *)pSrcImage + (size_t)height * srcImageStrideInBytes);
+		vx_uint8 *pLocalDst = pDstImage + (size_t)height * dstImageStrideInBytes;
+		int width = 0;
+		for (; width + 32 <= (int)dstWidth; width += 32)
 		{
-			vx_int16 pix = *pSrcImage++;
-			*pDstImage++ = (pix > threshold) ? (vx_uint8)255 : 0;
+			__m256i p0 = _mm256_loadu_si256((const __m256i *)pLocalSrc);
+			__m256i p1 = _mm256_loadu_si256((const __m256i *)(pLocalSrc + 16));
+			__m256i m0 = _mm256_cmpgt_epi16(p0, vThresh); // 0xFFFF where > threshold
+			__m256i m1 = _mm256_cmpgt_epi16(p1, vThresh);
+			__m256i z0 = _mm256_andnot_si256(m0, vZero16); // 0 (unused lane filler)
+			__m256i z1 = _mm256_andnot_si256(m1, vZero16);
+			__m128i b0 = _mm_packus_epi16(_mm256_castsi256_si128(m0), _mm256_extracti128_si256(m0, 1));
+			__m128i b1 = _mm_packus_epi16(_mm256_castsi256_si128(m1), _mm256_extracti128_si256(m1, 1));
+			_mm_storeu_si128((__m128i *)pLocalDst, b0);
+			_mm_storeu_si128((__m128i *)(pLocalDst + 16), b1);
+			pLocalSrc += 32;
+			pLocalDst += 32;
+		}
+		for (; width + 16 <= (int)dstWidth; width += 16)
+		{
+			__m256i p0 = _mm256_loadu_si256((const __m256i *)pLocalSrc);
+			__m256i m0 = _mm256_cmpgt_epi16(p0, vThresh);
+			__m128i b0 = _mm_packus_epi16(_mm256_castsi256_si128(m0), _mm256_extracti128_si256(m0, 1));
+			_mm_storeu_si128((__m128i *)pLocalDst, b0);
+			pLocalSrc += 16;
+			pLocalDst += 16;
+		}
+		for (; width < (int)dstWidth; width++)
+		{
+			vx_int16 pix = *pLocalSrc++;
+			*pLocalDst++ = (pix > threshold) ? (vx_uint8)255 : 0;
 		}
 	}
-	
-	/*Fix SSE Code
-	bool useAligned = ((((intptr_t)pSrcImage | (intptr_t)pDstImage) & 0xF) == 0) ? true : false;
-
-	__m128i *pLocalSrc_xmm, *pLocalDst_xmm;
-	vx_int16 *pLocalSrc;
-	vx_uint8 *pLocalDst;
-	__m128i pixels, pixels_16;
-	__m128i thresh = _mm_set1_epi16((short) threshold);
-
-	int alignedWidth = dstWidth & ~7;
-	int postfixWidth = dstWidth - alignedWidth;
-	if (useAligned)
+#else
+	const __m128i vThresh = _mm_set1_epi16((short)threshold);
+	for (int height = 0; height < (int)dstHeight; height++)
 	{
-		for (int height = 0; height < (int) dstHeight; height++)
+		vx_int16 *pLocalSrc = (vx_int16 *)((vx_uint8 *)pSrcImage + (size_t)height * srcImageStrideInBytes);
+		vx_uint8 *pLocalDst = pDstImage + (size_t)height * dstImageStrideInBytes;
+		int width = 0;
+		for (; width + 16 <= (int)dstWidth; width += 16)
 		{
-			pLocalSrc_xmm = (__m128i *) pSrcImage;
-			pLocalDst_xmm = (__m128i *) pDstImage;
-
-			for (int width = 0; width < alignedWidth; width += 8)
-			{
-				pixels = _mm_load_si128(pLocalSrc_xmm++);
-				pixels = _mm_cmpgt_epi16(pixels, thresh);
-				pixels_16 = _mm_packus_epi16 (pixels, _mm_setzero_si128());
-				_mm_store_si128(pLocalDst_xmm++, pixels_16);
-			}
-
-			pLocalSrc = (vx_int16 *)pLocalSrc_xmm;
-			pLocalDst = (vx_uint8 *)pLocalDst_xmm;
-			
-			for (int width = 0; width < postfixWidth; width++)
-			{
-				vx_int16 pix = *pLocalSrc++;
-				*pLocalDst++ = (pix > threshold) ? (vx_uint8)255 : 0;
-			}
-
-			pSrcImage += srcImageStrideInBytes;
-			pDstImage += dstImageStrideInBytes;
+			__m128i p0 = _mm_loadu_si128((const __m128i *)pLocalSrc);
+			__m128i p1 = _mm_loadu_si128((const __m128i *)(pLocalSrc + 8));
+			__m128i m0 = _mm_cmpgt_epi16(p0, vThresh);
+			__m128i m1 = _mm_cmpgt_epi16(p1, vThresh);
+			__m128i res = _mm_packus_epi16(m0, m1);
+			_mm_storeu_si128((__m128i *)pLocalDst, res);
+			pLocalSrc += 16;
+			pLocalDst += 16;
+		}
+		for (; width < (int)dstWidth; width++)
+		{
+			vx_int16 pix = *pLocalSrc++;
+			*pLocalDst++ = (pix > threshold) ? (vx_uint8)255 : 0;
 		}
 	}
-	else
-	{
-		for (int height = 0; height < (int) dstHeight; height++)
-		{
-			pLocalSrc_xmm = (__m128i *) pSrcImage;
-			pLocalDst_xmm = (__m128i *) pDstImage;
-
-			for (int width = 0; width < alignedWidth; width += 8)
-			{
-				pixels = _mm_loadu_si128(pLocalSrc_xmm++);
-				pixels = _mm_cmpgt_epi16(pixels, thresh);
-				_mm_storeu_si128(pLocalDst_xmm++, pixels);
-			}
-
-			pLocalSrc = (vx_int16 *)pLocalSrc_xmm;
-			pLocalDst = (vx_uint8 *)pLocalDst_xmm;
-
-			for (int width = 0; width < postfixWidth; width++)
-			{
-				vx_int16 pix = *pLocalSrc++;
-				*pLocalDst++ = (pix > threshold) ? (vx_uint8)255 : 0;
-			}
-
-			pSrcImage += srcImageStrideInBytes;
-			pDstImage += dstImageStrideInBytes;
-		}
-	}*/
+#endif
 	return AGO_SUCCESS;
 }
 
