@@ -71,23 +71,25 @@ static const __m128i CONST_0000FFFF = _mm_set1_epi32((int) 0x0000FFFF);
 
 // Compute integer source offsets + fractional parts for 4 map entries.
 // Map layout per entry: 16-bit x, 16-bit y. 3 LSBs are fraction, rest integer.
-// 0xFFFF entries are substituted by coordinate 1 to mimic border handling in the U8 path.
-static inline __m128i AgoRemapComputeOffsets_SSE(ago_coord2d_short_t *pMap, const __m128i &sstride, int bpp, __m128i &mapfrac, __m128i &mapxy)
+// Source coordinates are clamped to [0, srcW-2] x [0, srcH-2] so the bilinear
+// 2x2 neighborhood always stays in-bounds, matching the HIP path.
+static inline __m128i AgoRemapComputeOffsets_SSE(ago_coord2d_short_t *pMap, const __m128i &sstride, int bpp, int srcW, int srcH, __m128i &mapfrac, __m128i &mapxy)
 {
     __m128i map = _mm_loadu_si128((__m128i *)pMap);        // [x0,y0,x1,y1,x2,y2,x3,y3] as 16-bit
-    __m128i invalid = _mm_cmpeq_epi16(map, CONST_FFFF);
-    map = _mm_andnot_si128(invalid, map);
-    invalid = _mm_and_si128(invalid, _mm_set1_epi16(0x0008));
-    map = _mm_or_si128(map, invalid);
 
     mapfrac = _mm_and_si128(map, CONST_7);
-    mapxy = _mm_srli_epi16(map, 3);
+    mapxy = _mm_srli_epi16(map, 3);                        // [x0_int,y0_int,...]
+
+    // Clamp to source bounds so that (x0+1, y0+1) is always valid.
+    __m128i maxxy = _mm_set1_epi32(((srcH - 2) << 16) | (srcW - 2));
+    mapxy = _mm_max_epi16(mapxy, _mm_setzero_si128());
+    mapxy = _mm_min_epi16(mapxy, maxxy);
 
     __m128i ypart = _mm_srli_epi32(mapxy, 16);
     __m128i xpart = _mm_and_si128(mapxy, CONST_0000FFFF);
     ypart = _mm_mullo_epi32(ypart, sstride);
     xpart = _mm_mullo_epi32(xpart, _mm_set1_epi32(bpp));
-    return _mm_add_epi32(xpart, ypart);      // [off3,off2,off1,off0]
+    return _mm_add_epi32(xpart, ypart);      // [off0,off1,off2,off3]
 }
 
 int HafCpu_Remap_U8_U8_Nearest
@@ -433,7 +435,7 @@ int HafCpu_Remap_U24_U24_Bilinear
 		for (; x + 4 <= dstWidth; x += 4, pd += 12, pMapY_X += 4)
 		{
 			__m128i mapfrac, mapxy;
-			__m128i off = AgoRemapComputeOffsets_SSE(pMapY_X, sstride, 3, mapfrac, mapxy);
+			__m128i off = AgoRemapComputeOffsets_SSE(pMapY_X, sstride, 3, srcWidth, srcHeight, mapfrac, mapxy);
 
 			int fx0 = M128I(mapfrac).m128i_i16[0];
 			int fy0 = M128I(mapfrac).m128i_i16[1];
@@ -502,6 +504,9 @@ int HafCpu_Remap_U24_U24_Bilinear
 			    2, (char)0x80, 6, (char)0x80, 10, (char)0x80, 14, (char)0x80,
 			    (char)0x80, (char)0x80, (char)0x80, (char)0x80, (char)0x80, (char)0x80, (char)0x80, (char)0x80);
 
+			__m256i fy_vec = _mm256_setr_epi32(fy0, fy1, fy2, fy3, 0, 0, 0, 0);
+			__m256i onemyf_vec = _mm256_sub_epi32(_mm256_set1_epi32(8), fy_vec);
+
 			__m256i cR0 = _mm256_shuffle_epi8(TL, shufR_avx);
 			__m256i cR1 = _mm256_shuffle_epi8(TR, shufR_avx);
 			__m256i cR2 = _mm256_shuffle_epi8(BL, shufR_avx);
@@ -510,8 +515,9 @@ int HafCpu_Remap_U24_U24_Bilinear
 			__m256i botR = _mm256_unpacklo_epi16(cR2, cR3);
 			__m256i topR32 = _mm256_madd_epi16(topR, wx);
 			__m256i botR32 = _mm256_madd_epi16(botR, wx);
-			__m256i tbR16 = _mm256_packus_epi32(topR32, botR32);
-			__m256i resR32 = _mm256_madd_epi16(tbR16, wy);
+			__m256i resR32 = _mm256_add_epi32(
+			    _mm256_mullo_epi32(topR32, onemyf_vec),
+			    _mm256_mullo_epi32(botR32, fy_vec));
 			resR32 = _mm256_add_epi32(resR32, round32_avx);
 			resR32 = _mm256_srli_epi32(resR32, 6);
 			__m256i resR16 = _mm256_packus_epi32(resR32, resR32);
@@ -526,8 +532,9 @@ int HafCpu_Remap_U24_U24_Bilinear
 			__m256i botG = _mm256_unpacklo_epi16(cG2, cG3);
 			__m256i topG32 = _mm256_madd_epi16(topG, wx);
 			__m256i botG32 = _mm256_madd_epi16(botG, wx);
-			__m256i tbG16 = _mm256_packus_epi32(topG32, botG32);
-			__m256i resG32 = _mm256_madd_epi16(tbG16, wy);
+			__m256i resG32 = _mm256_add_epi32(
+			    _mm256_mullo_epi32(topG32, onemyf_vec),
+			    _mm256_mullo_epi32(botG32, fy_vec));
 			resG32 = _mm256_add_epi32(resG32, round32_avx);
 			resG32 = _mm256_srli_epi32(resG32, 6);
 			__m256i resG16 = _mm256_packus_epi32(resG32, resG32);
@@ -542,8 +549,9 @@ int HafCpu_Remap_U24_U24_Bilinear
 			__m256i botB = _mm256_unpacklo_epi16(cB2, cB3);
 			__m256i topB32 = _mm256_madd_epi16(topB, wx);
 			__m256i botB32 = _mm256_madd_epi16(botB, wx);
-			__m256i tbB16 = _mm256_packus_epi32(topB32, botB32);
-			__m256i resB32 = _mm256_madd_epi16(tbB16, wy);
+			__m256i resB32 = _mm256_add_epi32(
+			    _mm256_mullo_epi32(topB32, onemyf_vec),
+			    _mm256_mullo_epi32(botB32, fy_vec));
 			resB32 = _mm256_add_epi32(resB32, round32_avx);
 			resB32 = _mm256_srli_epi32(resB32, 6);
 			__m256i resB16 = _mm256_packus_epi32(resB32, resB32);
@@ -566,8 +574,8 @@ int HafCpu_Remap_U24_U24_Bilinear
 		for (; x + 2 <= dstWidth; x += 2, pd += 6, pMapY_X += 2)
 		{
 			__m128i mapfrac0, mapxy0, mapfrac1, mapxy1;
-			__m128i off0 = AgoRemapComputeOffsets_SSE(pMapY_X,     sstride, 3, mapfrac0, mapxy0);
-			__m128i off1 = AgoRemapComputeOffsets_SSE(pMapY_X + 1, sstride, 3, mapfrac1, mapxy1);
+			__m128i off0 = AgoRemapComputeOffsets_SSE(pMapY_X,     sstride, 3, srcWidth, srcHeight, mapfrac0, mapxy0);
+			__m128i off1 = AgoRemapComputeOffsets_SSE(pMapY_X + 1, sstride, 3, srcWidth, srcHeight, mapfrac1, mapxy1);
 
 			int fx0 = M128I(mapfrac0).m128i_i16[0];
 			int fy0 = M128I(mapfrac0).m128i_i16[1];
@@ -717,7 +725,7 @@ int HafCpu_Remap_U32_U32_Bilinear
 		for (; x + 4 <= dstWidth; x += 4, pd += 16, pMapY_X += 4)
 		{
 			__m128i mapfrac, mapxy;
-			__m128i off = AgoRemapComputeOffsets_SSE(pMapY_X, sstride, 4, mapfrac, mapxy);
+			__m128i off = AgoRemapComputeOffsets_SSE(pMapY_X, sstride, 4, srcWidth, srcHeight, mapfrac, mapxy);
 
 			int fx0 = M128I(mapfrac).m128i_i16[0];
 			int fy0 = M128I(mapfrac).m128i_i16[1];
@@ -770,6 +778,9 @@ int HafCpu_Remap_U32_U32_Bilinear
 			    (short)(8 - fy0), (short)fy0, (short)(8 - fy1), (short)fy1,
 			    (short)(8 - fy2), (short)fy2, (short)(8 - fy3), (short)fy3);
 
+			__m256i fy_vec = _mm256_setr_epi32(fy0, fy1, fy2, fy3, 0, 0, 0, 0);
+			__m256i onemyf_vec = _mm256_sub_epi32(_mm256_set1_epi32(8), fy_vec);
+
 			__m256i cR0 = _mm256_shuffle_epi8(TL, shufR_avx);
 			__m256i cR1 = _mm256_shuffle_epi8(TR, shufR_avx);
 			__m256i cR2 = _mm256_shuffle_epi8(BL, shufR_avx);
@@ -778,8 +789,9 @@ int HafCpu_Remap_U32_U32_Bilinear
 			__m256i botR = _mm256_unpacklo_epi16(cR2, cR3);
 			__m256i topR32 = _mm256_madd_epi16(topR, wx);
 			__m256i botR32 = _mm256_madd_epi16(botR, wx);
-			__m256i tbR16 = _mm256_packus_epi32(topR32, botR32);
-			__m256i resR32 = _mm256_madd_epi16(tbR16, wy);
+			__m256i resR32 = _mm256_add_epi32(
+			    _mm256_mullo_epi32(topR32, onemyf_vec),
+			    _mm256_mullo_epi32(botR32, fy_vec));
 			resR32 = _mm256_add_epi32(resR32, round32_avx);
 			resR32 = _mm256_srli_epi32(resR32, 6);
 			__m256i resR16 = _mm256_packus_epi32(resR32, resR32);
@@ -794,8 +806,9 @@ int HafCpu_Remap_U32_U32_Bilinear
 			__m256i botG = _mm256_unpacklo_epi16(cG2, cG3);
 			__m256i topG32 = _mm256_madd_epi16(topG, wx);
 			__m256i botG32 = _mm256_madd_epi16(botG, wx);
-			__m256i tbG16 = _mm256_packus_epi32(topG32, botG32);
-			__m256i resG32 = _mm256_madd_epi16(tbG16, wy);
+			__m256i resG32 = _mm256_add_epi32(
+			    _mm256_mullo_epi32(topG32, onemyf_vec),
+			    _mm256_mullo_epi32(botG32, fy_vec));
 			resG32 = _mm256_add_epi32(resG32, round32_avx);
 			resG32 = _mm256_srli_epi32(resG32, 6);
 			__m256i resG16 = _mm256_packus_epi32(resG32, resG32);
@@ -810,8 +823,9 @@ int HafCpu_Remap_U32_U32_Bilinear
 			__m256i botB = _mm256_unpacklo_epi16(cB2, cB3);
 			__m256i topB32 = _mm256_madd_epi16(topB, wx);
 			__m256i botB32 = _mm256_madd_epi16(botB, wx);
-			__m256i tbB16 = _mm256_packus_epi32(topB32, botB32);
-			__m256i resB32 = _mm256_madd_epi16(tbB16, wy);
+			__m256i resB32 = _mm256_add_epi32(
+			    _mm256_mullo_epi32(topB32, onemyf_vec),
+			    _mm256_mullo_epi32(botB32, fy_vec));
 			resB32 = _mm256_add_epi32(resB32, round32_avx);
 			resB32 = _mm256_srli_epi32(resB32, 6);
 			__m256i resB16 = _mm256_packus_epi32(resB32, resB32);
@@ -826,8 +840,9 @@ int HafCpu_Remap_U32_U32_Bilinear
 			__m256i botA = _mm256_unpacklo_epi16(cA2, cA3);
 			__m256i topA32 = _mm256_madd_epi16(topA, wx);
 			__m256i botA32 = _mm256_madd_epi16(botA, wx);
-			__m256i tbA16 = _mm256_packus_epi32(topA32, botA32);
-			__m256i resA32 = _mm256_madd_epi16(tbA16, wy);
+			__m256i resA32 = _mm256_add_epi32(
+			    _mm256_mullo_epi32(topA32, onemyf_vec),
+			    _mm256_mullo_epi32(botA32, fy_vec));
 			resA32 = _mm256_add_epi32(resA32, round32_avx);
 			resA32 = _mm256_srli_epi32(resA32, 6);
 			__m256i resA16 = _mm256_packus_epi32(resA32, resA32);
@@ -842,8 +857,8 @@ int HafCpu_Remap_U32_U32_Bilinear
 		for (; x + 2 <= dstWidth; x += 2, pd += 8, pMapY_X += 2)
 		{
 			__m128i mapfrac0, mapxy0, mapfrac1, mapxy1;
-			__m128i off0 = AgoRemapComputeOffsets_SSE(pMapY_X,     sstride, 4, mapfrac0, mapxy0);
-			__m128i off1 = AgoRemapComputeOffsets_SSE(pMapY_X + 1, sstride, 4, mapfrac1, mapxy1);
+			__m128i off0 = AgoRemapComputeOffsets_SSE(pMapY_X,     sstride, 4, srcWidth, srcHeight, mapfrac0, mapxy0);
+			__m128i off1 = AgoRemapComputeOffsets_SSE(pMapY_X + 1, sstride, 4, srcWidth, srcHeight, mapfrac1, mapxy1);
 
 			int fx0 = M128I(mapfrac0).m128i_i16[0];
 			int fy0 = M128I(mapfrac0).m128i_i16[1];
