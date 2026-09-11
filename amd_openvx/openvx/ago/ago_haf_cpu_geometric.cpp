@@ -443,8 +443,6 @@ int HafCpu_Remap_U8_U8_Bilinear
 }
 
 
-// CPU scalar fallback for RGB (U24) bilinear remap.
-// CPU scalar fallback for RGB (U24) bilinear remap.
 // SSE RGB bilinear remap: 2 pixels per iteration (load 3-byte pixels as masked 32-bit).
 int HafCpu_Remap_U24_U24_Bilinear
 (
@@ -1101,32 +1099,33 @@ int HafCpu_Remap_U24_U24_Bilinear_Constant
 	vx_uint8				  borderValue
 )
 {
-	// Use the existing undefined-border SIMD bilinear path for the whole image,
-	// then overwrite any destination pixels whose remap entry is the out-of-bounds
-	// sentinel (0xFFFF) with the configured constant border value. The base SIMD
-	// kernel is row-parallel (OpenMP), so both the constant-border and
-	// undefined-border paths are multi-threaded.
-	int err = HafCpu_Remap_U24_U24_Bilinear(dstWidth, dstHeight, pDstImage, dstImageStrideInBytes,
-	                                        srcWidth, srcHeight, pSrcImage, srcImageStrideInBytes,
-	                                        pMap, mapStrideInBytes);
-	if (err != AGO_SUCCESS)
-		return err;
-
 	for (vx_uint32 y = 0; y < dstHeight; ++y)
 	{
 		ago_coord2d_short_t *pMapY_X = (ago_coord2d_short_t *)((vx_uint8 *)pMap + (size_t)y * mapStrideInBytes);
 		vx_uint8 *pd = pDstImage + (size_t)y * dstImageStrideInBytes;
 		for (vx_uint32 x = 0; x < dstWidth; ++x, ++pMapY_X, pd += 3)
 		{
-			if (pMapY_X->x == (vx_int16)0xFFFF || pMapY_X->y == (vx_int16)0xFFFF)
-			{
+			if (pMapY_X->x == (vx_int16)0xFFFF || pMapY_X->y == (vx_int16)0xFFFF) {
 				pd[0] = borderValue;
 				pd[1] = borderValue;
 				pd[2] = borderValue;
+			} else {
+				int mx = pMapY_X->x >> 3;
+				int my = pMapY_X->y >> 3;
+				int fx = pMapY_X->x & 7;
+				int fy = pMapY_X->y & 7;
+				int w00 = (8 - fx) * (8 - fy), w10 = fx * (8 - fy), w01 = (8 - fx) * fy, w11 = fx * fy;
+				for (int c = 0; c < 3; ++c)
+				{
+					int v00 = ((mx	   >= 0) && (my	   >= 0) && (mx	   < (int)srcWidth) && (my	   < (int)srcHeight)) ? pSrcImage[(size_t)my * srcImageStrideInBytes + (size_t)mx * 3 + c] : borderValue;
+					int v10 = ((mx + 1 >= 0) && (my	   >= 0) && (mx + 1 < (int)srcWidth) && (my	   < (int)srcHeight)) ? pSrcImage[(size_t)my * srcImageStrideInBytes + (size_t)(mx + 1) * 3 + c] : borderValue;
+					int v01 = ((mx	   >= 0) && (my + 1 >= 0) && (mx	   < (int)srcWidth) && (my + 1 < (int)srcHeight)) ? pSrcImage[(size_t)(my + 1) * srcImageStrideInBytes + (size_t)mx * 3 + c] : borderValue;
+					int v11 = ((mx + 1 >= 0) && (my + 1 >= 0) && (mx + 1 < (int)srcWidth) && (my + 1 < (int)srcHeight)) ? pSrcImage[(size_t)(my + 1) * srcImageStrideInBytes + (size_t)(mx + 1) * 3 + c] : borderValue;
+					pd[c] = (vx_uint8)((v00 * w00 + v10 * w10 + v01 * w01 + v11 * w11 + 32) >> 6);
+				}
 			}
 		}
 	}
-
 	return AGO_SUCCESS;
 }
 
@@ -1189,33 +1188,34 @@ int HafCpu_Remap_U32_U32_Bilinear_Constant
 	vx_uint8				  borderValue
 )
 {
-	// Use the existing undefined-border SIMD bilinear path for the whole image,
-	// then overwrite any destination pixels whose remap entry is the out-of-bounds
-	// sentinel (0xFFFF) with the configured constant border value. The base SIMD
-	// kernel is row-parallel (OpenMP), so both the constant-border and
-	// undefined-border paths are multi-threaded.
-	int err = HafCpu_Remap_U32_U32_Bilinear(dstWidth, dstHeight, pDstImage, dstImageStrideInBytes,
-	                                        srcWidth, srcHeight, pSrcImage, srcImageStrideInBytes,
-	                                        pMap, mapStrideInBytes);
-	if (err != AGO_SUCCESS)
-		return err;
-
 	for (vx_uint32 y = 0; y < dstHeight; ++y)
 	{
 		ago_coord2d_short_t *pMapY_X = (ago_coord2d_short_t *)((vx_uint8 *)pMap + (size_t)y * mapStrideInBytes);
 		vx_uint8 *pd = pDstImage + (size_t)y * dstImageStrideInBytes;
 		for (vx_uint32 x = 0; x < dstWidth; ++x, ++pMapY_X, pd += 4)
 		{
-			if (pMapY_X->x == (vx_int16)0xFFFF || pMapY_X->y == (vx_int16)0xFFFF)
-			{
+			if (pMapY_X->x == (vx_int16)0xFFFF || pMapY_X->y == (vx_int16)0xFFFF) {
 				pd[0] = borderValue;
 				pd[1] = borderValue;
 				pd[2] = borderValue;
 				pd[3] = borderValue;
+			} else {
+				int mx = pMapY_X->x >> 3;
+				int my = pMapY_X->y >> 3;
+				int fx = pMapY_X->x & 7;
+				int fy = pMapY_X->y & 7;
+				int w00 = (8 - fx) * (8 - fy), w10 = fx * (8 - fy), w01 = (8 - fx) * fy, w11 = fx * fy;
+				for (int c = 0; c < 4; ++c)
+				{
+					int v00 = ((mx	   >= 0) && (my	   >= 0) && (mx	   < (int)srcWidth) && (my	   < (int)srcHeight)) ? pSrcImage[(size_t)my * srcImageStrideInBytes + (size_t)mx * 4 + c] : borderValue;
+					int v10 = ((mx + 1 >= 0) && (my	   >= 0) && (mx + 1 < (int)srcWidth) && (my	   < (int)srcHeight)) ? pSrcImage[(size_t)my * srcImageStrideInBytes + (size_t)(mx + 1) * 4 + c] : borderValue;
+					int v01 = ((mx	   >= 0) && (my + 1 >= 0) && (mx	   < (int)srcWidth) && (my + 1 < (int)srcHeight)) ? pSrcImage[(size_t)(my + 1) * srcImageStrideInBytes + (size_t)mx * 4 + c] : borderValue;
+					int v11 = ((mx + 1 >= 0) && (my + 1 >= 0) && (mx + 1 < (int)srcWidth) && (my + 1 < (int)srcHeight)) ? pSrcImage[(size_t)(my + 1) * srcImageStrideInBytes + (size_t)(mx + 1) * 4 + c] : borderValue;
+					pd[c] = (vx_uint8)((v00 * w00 + v10 * w10 + v01 * w01 + v11 * w11 + 32) >> 6);
+				}
 			}
 		}
 	}
-
 	return AGO_SUCCESS;
 }
 
