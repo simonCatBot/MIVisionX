@@ -1554,6 +1554,7 @@ int agoGetDataFromDescription(AgoContext * acontext, AgoGraph * agraph, AgoData 
         data->ref.type = VX_TYPE_THRESHOLD;
         const char *s = strstr(desc, ","); if (!s) return -1;
         char thresh_type[64];
+        if ((size_t)(s - desc) >= sizeof(thresh_type)) return -1;
         memcpy(thresh_type, desc, s - desc); thresh_type[s - desc] = 0;
         data->u.thr.thresh_type = agoName2Enum(thresh_type);
         s++;
@@ -2205,7 +2206,7 @@ void agoGetDataName(vx_char * name, AgoData * data)
 {
     name[0] = 0;
     for (AgoData * pdata = data; pdata; pdata = pdata->parent) {
-        char tmp[512]; strcpy(tmp, name);
+        char tmp[MAX_MODULE_NAME_SIZE]; strncpy(tmp, name, sizeof(tmp) - 1); tmp[sizeof(tmp) - 1] = 0;
         if (pdata->parent) {
             snprintf(name, MAX_MODULE_NAME_SIZE, "[%d]%s", (pdata->parent->ref.type == VX_TYPE_DELAY || pdata->parent->ref.type == VX_TYPE_OBJECT_ARRAY) ? -pdata->siblingIndex : pdata->siblingIndex, tmp);
         }
@@ -3631,7 +3632,7 @@ AgoGraphPipeliningState::AgoGraphPipeliningState()
     : schedule_mode{ VX_GRAPH_SCHEDULE_MODE_NORMAL }, timeout_ms{ VX_TIMEOUT_WAIT_FOREVER },
       event_timeout_ms{ VX_TIMEOUT_WAIT_FOREVER }, pipeline_depth{ 1 },
       streaming_enabled{ false }, trigger_node{ nullptr }, streaming_stop{ false },
-      active_executions{ 0 }, executor_stop{ false }
+      active_executions{ 0 }, executor_stop{ false }, manual_unclaimed_executions{ 0 }
 {
 }
 
